@@ -1,41 +1,58 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List
+from openai import OpenAI
+import numpy as np
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
-import json
 
 app = FastAPI()
 
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["OPTIONS", "POST"],
+    allow_headers=["*"]
 )
 
-# Load student data from the specified JSON file
-file_path = "q-vercel-python_2.json"
+# OpenAI API client
+client = OpenAI(api_key="your_openai_api_key")
 
-try:
-    with open(file_path, "r") as file:
-        students = json.load(file)  # Load data into `students`
-except FileNotFoundError:
-    students = []  # Default to an empty list if the file is missing
+class SimilarityRequest(BaseModel):
+    docs: List[str]
+    query: str
 
-# Convert list of students to a dictionary for quick lookup
-students_dict = {entry["name"]: entry["marks"] for entry in students}
+class SimilarityResponse(BaseModel):
+    matches: List[str]
 
-@app.get("/")
-async def get_students(name: Optional[List[str]] = Query(default=[])):
-    """Fetch student marks based on optional name filtering while maintaining order."""
-    if name:
-        # Preserve the order in which names are passed
-        filtered_marks = [students_dict.get(n, None) for n in name]
-        return {"marks": filtered_marks}
-    
-    return {"marks": students}  # Return all data if no filter is applied
+def get_embedding(text: str) -> List[float]:
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text
+    )
+    return response.data[0].embedding
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+
+@app.post("/similarity", response_model=SimilarityResponse)
+def get_most_similar(request: SimilarityRequest):
+    try:
+        # Compute embeddings for docs
+        doc_embeddings = [get_embedding(doc) for doc in request.docs]
+        # Compute embedding for query
+        query_embedding = get_embedding(request.query)
+        
+        # Compute similarities
+        similarities = [cosine_similarity(query_embedding, doc_emb) for doc_emb in doc_embeddings]
+        
+        # Rank documents by similarity
+        sorted_indices = np.argsort(similarities)[::-1][:3]
+        sorted_docs = [request.docs[i] for i in sorted_indices]
+        
+        return {"matches": sorted_docs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Example local endpoint URL: http://127.0.0.1:8000/similarity
